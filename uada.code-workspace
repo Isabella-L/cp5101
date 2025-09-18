@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../SPAA"
+		},
+		{
+			"path": "../roboticAttack"
+		}
+	],
+	"settings": {}
+}
