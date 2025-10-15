@@ -1,5 +1,9 @@
 __pycache__/
+__init__.py
+build/
 pcnet/data/prj_share/
 pcnet/data/setups/coffee_mug/
 pcnet/log/
 
+openvla/
+LIBERO/

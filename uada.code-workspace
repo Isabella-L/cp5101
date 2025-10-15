@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "../roboticAttack"
+		},
+		{
+			"path": "../clean_uada"
 		}
 	],
 	"settings": {}

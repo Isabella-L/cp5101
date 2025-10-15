@@ -2,8 +2,8 @@ prj_screen_sz:  # projector screen resolution (i.e., set in the OS)
 - 800
 - 600
 prj_im_sz: # projector input image resolution, the image will be scaled to match the prj_screen_sz by plt
-- 256
-- 256
+- 200 # 256 in spaa
+- 200 # 256 in spaa
 prj_offset:  # an offset to move the projector plt figure to the correct screen (check your OS display setting)
 - 3900
 - -300
@@ -14,7 +14,7 @@ cam_crop_sz: # a size used to center crop camera output frame, cam_crop_sz <= ca
 - 960
 - 720
 cam_im_sz:  # a size used to resize center cropped camera output frame, cam_im_sz <= cam_crop_sz, and should keep aspect ratio
-- 320
+- 240 # 320 in spaa
 - 240
 classifier_crop_sz: # a size used to center crop resize cam image for square classifier input, classifier_crop_sz <= cam_im_sz
 - 240

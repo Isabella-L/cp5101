@@ -11,26 +11,26 @@ import pytorch_tps
 class CompenNet(nn.Module):
     def __init__(self):
         super(CompenNet, self).__init__()
-        self.name = 'CompenNet'
+        self.name = "CompenNet"
         self.relu = nn.ReLU()
 
         # backbone branch
-        self.conv1   = nn.Conv2d(3  , 32 , 3, 2, 1)
-        self.conv2   = nn.Conv2d(32 , 64 , 3, 2, 1)
-        self.conv3   = nn.Conv2d(64 , 128, 3, 1, 1)
-        self.conv4   = nn.Conv2d(128, 256, 3, 1, 1)
-        self.conv5   = nn.Conv2d(256, 128, 3, 1, 1)
+        self.conv1 = nn.Conv2d(3, 32, 3, 2, 1)
+        self.conv2 = nn.Conv2d(32, 64, 3, 2, 1)
+        self.conv3 = nn.Conv2d(64, 128, 3, 1, 1)
+        self.conv4 = nn.Conv2d(128, 256, 3, 1, 1)
+        self.conv5 = nn.Conv2d(256, 128, 3, 1, 1)
 
         # surface image feature extraction branch
-        self.conv1_s = nn.Conv2d(3  , 32 , 3, 2, 1)
-        self.conv2_s = nn.Conv2d(32 , 64 , 3, 2, 1)
-        self.conv3_s = nn.Conv2d(64 , 128, 3, 1, 1)
+        self.conv1_s = nn.Conv2d(3, 32, 3, 2, 1)
+        self.conv2_s = nn.Conv2d(32, 64, 3, 2, 1)
+        self.conv3_s = nn.Conv2d(64, 128, 3, 1, 1)
         self.conv4_s = nn.Conv2d(128, 256, 3, 1, 1)
 
         # transposed conv
         self.transConv1 = nn.ConvTranspose2d(128, 64, 2, 2, 0)
-        self.transConv2 = nn.ConvTranspose2d(64 , 32, 2, 2, 0)
-        self.conv6      = nn.Conv2d(32          , 3 , 3, 1, 1)
+        self.transConv2 = nn.ConvTranspose2d(64, 32, 2, 2, 0)
+        self.conv6 = nn.Conv2d(32, 3, 3, 1, 1)
 
         # skip layers
         self.skipConv1 = nn.Sequential(
@@ -39,17 +39,17 @@ class CompenNet(nn.Module):
             nn.Conv2d(3, 3, 3, 1, 1),
             self.relu,
             nn.Conv2d(3, 3, 3, 1, 1),
-            self.relu
+            self.relu,
         )
 
         self.skipConv2 = nn.Conv2d(32, 64, 1, 1, 0)
         self.skipConv3 = nn.Conv2d(64, 128, 1, 1, 0)
 
         # stores biases of surface feature branch (net simplification)
-        self.register_buffer('res1_s', None)
-        self.register_buffer('res2_s', None)
-        self.register_buffer('res3_s', None)
-        self.register_buffer('res4_s', None)
+        self.register_buffer("res1_s", None)
+        self.register_buffer("res2_s", None)
+        self.register_buffer("res3_s", None)
+        self.register_buffer("res4_s", None)
 
         # initialization function, first checks the module type,
         def _initialize_weights(m):
@@ -80,16 +80,16 @@ class CompenNet(nn.Module):
 
         # backbone
         res1 = self.skipConv1(x)
-        x    = self.relu(self.conv1(x) + res1_s)
+        x = self.relu(self.conv1(x) + res1_s)
         res2 = self.skipConv2(x)
-        x    = self.relu(self.conv2(x) + res2_s)
+        x = self.relu(self.conv2(x) + res2_s)
         res3 = self.skipConv3(x)
-        x    = self.relu(self.conv3(x) + res3_s)
-        x    = self.relu(self.conv4(x) + res4_s)
-        x    = self.relu(self.conv5(x) + res3)
-        x    = self.relu(self.transConv1(x) + res2)
-        x    = self.relu(self.transConv2(x))
-        x    = torch.clamp(self.relu(self.conv6(x) + res1), max = 1)
+        x = self.relu(self.conv3(x) + res3_s)
+        x = self.relu(self.conv4(x) + res4_s)
+        x = self.relu(self.conv5(x) + res3)
+        x = self.relu(self.transConv1(x) + res2)
+        x = self.relu(self.transConv2(x))
+        x = torch.clamp(self.relu(self.conv6(x) + res1), max=1)
 
         return x
 
@@ -98,27 +98,36 @@ class CompenNet(nn.Module):
 class WarpingNet(nn.Module):
     def __init__(self, grid_shape=(6, 6), out_size=(256, 256), with_refine=True):
         super(WarpingNet, self).__init__()
-        self.grid_shape  = grid_shape
-        self.out_size    = tuple(out_size)
+        self.grid_shape = grid_shape
+        self.out_size = tuple(out_size)
         self.with_refine = with_refine  # becomes WarpingNet w/o refine if set to false
-        self.name        = self.__class__.__name__ if with_refine else self.__class__.__name__ + '_without_refine'
+        self.name = (
+            self.__class__.__name__
+            if with_refine
+            else self.__class__.__name__ + "_without_refine"
+        )
 
         # relu
-        self.relu      = nn.ReLU()
+        self.relu = nn.ReLU()
         self.leakyRelu = nn.LeakyReLU(0.1)
 
         # final refined grid
-        self.register_buffer('fine_grid', None)
+        self.register_buffer("fine_grid", None)
 
         # affine params
         self.affine_mat = nn.Parameter(torch.Tensor([1, 0, 0, 0, 1, 0]).view(-1, 2, 3))
 
         # tps params
-        self.nctrl  = self.grid_shape[0] * self.grid_shape[1]
-        self.nparam = (self.nctrl + 2)
-        ctrl_pts    = pytorch_tps.uniform_grid(grid_shape)
-        self.register_buffer('ctrl_pts', ctrl_pts.view(-1, 2))
-        self.theta  = nn.Parameter(torch.ones((1, self.nparam * 2), dtype=torch.float32).view(-1, self.nparam, 2) * 1e-3)
+        self.nctrl = self.grid_shape[0] * self.grid_shape[1]
+        self.nparam = self.nctrl + 2
+        ctrl_pts = pytorch_tps.uniform_grid(grid_shape)
+        self.register_buffer("ctrl_pts", ctrl_pts.view(-1, 2))
+        self.theta = nn.Parameter(
+            torch.ones((1, self.nparam * 2), dtype=torch.float32).view(
+                -1, self.nparam, 2
+            )
+            * 1e-3
+        )
 
         # initialization function, first checks the module type,
         def init_normal(m):
@@ -135,7 +144,7 @@ class WarpingNet(nn.Module):
                 nn.ConvTranspose2d(64, 32, 2, 2, 0),
                 self.relu,
                 nn.ConvTranspose2d(32, 2, 2, 2, 0),
-                self.leakyRelu
+                self.leakyRelu,
             )
             self.grid_refine_net.apply(init_normal)
         else:
@@ -148,15 +157,25 @@ class WarpingNet(nn.Module):
     # simplify trained model to a single sampling grid for faster testing
     def simplify(self, x):
         # generate coarse affine and TPS grids
-        coarse_affine_grid = F.affine_grid(self.affine_mat, torch.Size([1, x.shape[1], x.shape[2], x.shape[3]]), align_corners=True).permute((0, 3, 1, 2))
-        coarse_tps_grid = pytorch_tps.tps_grid(self.theta, self.ctrl_pts, (1, x.size()[1]) + self.out_size)
+        coarse_affine_grid = F.affine_grid(
+            self.affine_mat,
+            torch.Size([1, x.shape[1], x.shape[2], x.shape[3]]),
+            align_corners=True,
+        ).permute((0, 3, 1, 2))
+        coarse_tps_grid = pytorch_tps.tps_grid(
+            self.theta, self.ctrl_pts, (1, x.size()[1]) + self.out_size
+        )
 
         # use TPS grid to sample affine grid
-        tps_grid = F.grid_sample(coarse_affine_grid, coarse_tps_grid, align_corners=True)
+        tps_grid = F.grid_sample(
+            coarse_affine_grid, coarse_tps_grid, align_corners=True
+        )
 
         # refine TPS grid using grid refinement net and save it to self.fine_grid
         if self.with_refine:
-            self.fine_grid = torch.clamp(self.grid_refine_net(tps_grid) + tps_grid, min=-1, max=1).permute((0, 2, 3, 1))
+            self.fine_grid = torch.clamp(
+                self.grid_refine_net(tps_grid) + tps_grid, min=-1, max=1
+            ).permute((0, 2, 3, 1))
         else:
             self.fine_grid = torch.clamp(tps_grid, min=-1, max=1).permute((0, 2, 3, 1))
 
@@ -165,15 +184,25 @@ class WarpingNet(nn.Module):
         if self.fine_grid is None:
             # not simplified (training/validation)
             # generate coarse affine and TPS grids
-            coarse_affine_grid = F.affine_grid(self.affine_mat, torch.Size([1, x.shape[1], x.shape[2], x.shape[3]]), align_corners=True).permute((0, 3, 1, 2))
-            coarse_tps_grid = pytorch_tps.tps_grid(self.theta, self.ctrl_pts, (1, x.size()[1]) + self.out_size)
+            coarse_affine_grid = F.affine_grid(
+                self.affine_mat,
+                torch.Size([1, x.shape[1], x.shape[2], x.shape[3]]),
+                align_corners=True,
+            ).permute((0, 3, 1, 2))
+            coarse_tps_grid = pytorch_tps.tps_grid(
+                self.theta, self.ctrl_pts, (1, x.size()[1]) + self.out_size
+            )
 
             # use TPS grid to sample affine grid
-            tps_grid = F.grid_sample(coarse_affine_grid, coarse_tps_grid, align_corners=True).repeat(x.shape[0], 1, 1, 1)
+            tps_grid = F.grid_sample(
+                coarse_affine_grid, coarse_tps_grid, align_corners=True
+            ).repeat(x.shape[0], 1, 1, 1)
 
             # refine TPS grid using grid refinement net and save it to self.fine_grid
             if self.with_refine:
-                fine_grid = torch.clamp(self.grid_refine_net(tps_grid) + tps_grid, min=-1, max=1).permute((0, 2, 3, 1))
+                fine_grid = torch.clamp(
+                    self.grid_refine_net(tps_grid) + tps_grid, min=-1, max=1
+                ).permute((0, 2, 3, 1))
             else:
                 fine_grid = torch.clamp(tps_grid, min=-1, max=1).permute((0, 2, 3, 1))
         else:
@@ -189,11 +218,17 @@ class CompenNetPlusplus(nn.Module):
     # CompenNet++
     def __init__(self, warping_net=None, compen_net=None):
         super(CompenNetPlusplus, self).__init__()
-        self.name = 'CompenNet++'
+        self.name = "CompenNet++"
 
         # initialize from existing models or create new models
-        self.warping_net = copy.deepcopy(warping_net.module) if warping_net is not None else WarpingNet()
-        self.compen_net  = copy.deepcopy(compen_net.module) if compen_net is not None else CompenNet()
+        self.warping_net = (
+            copy.deepcopy(warping_net.module)
+            if warping_net is not None
+            else WarpingNet()
+        )
+        self.compen_net = (
+            copy.deepcopy(compen_net.module) if compen_net is not None else CompenNet()
+        )
 
     # simplify trained model to a single sampling grid for faster testing
     def simplify(self, s):
@@ -211,32 +246,37 @@ class CompenNetPlusplus(nn.Module):
 
         return x
 
+
 class ShadingNetSPAA(nn.Module):
     # Extended from CompenNet
     def __init__(self, use_rough=True):
         super(ShadingNetSPAA, self).__init__()
         self.use_rough = use_rough
-        self.name = self.__class__.__name__ if self.use_rough else self.__class__.__name__ + '_no_rough'
+        self.name = (
+            self.__class__.__name__
+            if self.use_rough
+            else self.__class__.__name__ + "_no_rough"
+        )
         self.relu = nn.ReLU()
 
         # backbone branch
-        self.conv1 = nn.Conv2d(3  , 32 , 3, 2, 1)
-        self.conv2 = nn.Conv2d(32 , 64 , 3, 2, 1)
-        self.conv3 = nn.Conv2d(64 , 128, 3, 1, 1)
+        self.conv1 = nn.Conv2d(3, 32, 3, 2, 1)
+        self.conv2 = nn.Conv2d(32, 64, 3, 2, 1)
+        self.conv3 = nn.Conv2d(64, 128, 3, 1, 1)
         self.conv4 = nn.Conv2d(128, 256, 3, 1, 1)
         self.conv5 = nn.Conv2d(256, 128, 3, 1, 1)
 
         # surface image feature extraction branch
         num_chan = 6 if self.use_rough else 3
-        self.conv1_s = nn.Conv2d(num_chan, 32 , 3, 2, 1)
-        self.conv2_s = nn.Conv2d(32      , 64 , 3, 2, 1)
-        self.conv3_s = nn.Conv2d(64      , 128, 3, 1, 1)
-        self.conv4_s = nn.Conv2d(128     , 256, 3, 1, 1)
+        self.conv1_s = nn.Conv2d(num_chan, 32, 3, 2, 1)
+        self.conv2_s = nn.Conv2d(32, 64, 3, 2, 1)
+        self.conv3_s = nn.Conv2d(64, 128, 3, 1, 1)
+        self.conv4_s = nn.Conv2d(128, 256, 3, 1, 1)
 
         # transposed conv
-        self.transConv1 = nn.ConvTranspose2d(128, 64, 3, 2, 1 , 1)
-        self.transConv2 = nn.ConvTranspose2d(64 , 32, 2, 2, 0)
-        self.conv6      = nn.Conv2d(32          , 3 , 3, 1, 1)
+        self.transConv1 = nn.ConvTranspose2d(128, 64, 3, 2, 1, 1)
+        self.transConv2 = nn.ConvTranspose2d(64, 32, 2, 2, 0)
+        self.conv6 = nn.Conv2d(32, 3, 3, 1, 1)
 
         # skip layers
         self.skipConv1 = nn.Sequential(
@@ -245,17 +285,17 @@ class ShadingNetSPAA(nn.Module):
             nn.Conv2d(3, 3, 3, 1, 1),
             self.relu,
             nn.Conv2d(3, 3, 3, 1, 1),
-            self.relu
+            self.relu,
         )
 
         self.skipConv2 = nn.Conv2d(32, 64, 1, 1, 0)
         self.skipConv3 = nn.Conv2d(64, 128, 3, 1, 1)
 
         # stores biases of surface feature branch (net simplification)
-        self.register_buffer('res1_s', None)
-        self.register_buffer('res2_s', None)
-        self.register_buffer('res3_s', None)
-        self.register_buffer('res4_s', None)
+        self.register_buffer("res1_s", None)
+        self.register_buffer("res2_s", None)
+        self.register_buffer("res3_s", None)
+        self.register_buffer("res4_s", None)
 
         # initialization function, first checks the module type,
         def _initialize_weights(m):
@@ -288,39 +328,56 @@ class ShadingNetSPAA(nn.Module):
 
         # backbone
         # res1 = self.skipConv1(x)
-        res1   = self.skipConv1(argv[0])
-        x      = self.relu(self.conv1(x) + res1_s)
-        res2   = self.skipConv2(x)
-        x      = self.relu(self.conv2(x) + res2_s)
-        res3   = self.skipConv3(x)
-        x      = self.relu(self.conv3(x) + res3_s)
-        x      = self.relu(self.conv4(x) + res4_s)
-        x      = self.relu(self.conv5(x) + res3)
-        x      = self.relu(self.transConv1(x) + res2)
-        x      = self.relu(self.transConv2(x))
-        x      = torch.clamp(self.relu(self.conv6(x) + res1), max = 1)
+        res1 = self.skipConv1(argv[0])
+        x = self.relu(self.conv1(x) + res1_s)
+        res2 = self.skipConv2(x)
+        x = self.relu(self.conv2(x) + res2_s)
+        res3 = self.skipConv3(x)
+        x = self.relu(self.conv3(x) + res3_s)
+        x = self.relu(self.conv4(x) + res4_s)
+        x = self.relu(self.conv5(x) + res3)
+        x = self.relu(self.transConv1(x) + res2)
+        x = self.relu(self.transConv2(x))
+        x = torch.clamp(self.relu(self.conv6(x) + res1), max=1)
 
         return x
 
+
 class PCNet(nn.Module):
     # Project-and-Capture Network for SPAA
-    def __init__(self, mask, warping_net=None, shading_net=None, fix_shading_net=False, use_mask=True, use_rough=True):
+    def __init__(
+        self,
+        mask,
+        warping_net=None,
+        shading_net=None,
+        fix_shading_net=False,
+        use_mask=True,
+        use_rough=True,
+    ):
         super(PCNet, self).__init__()
-        self.name      = self.__class__.__name__
-        self.use_mask  = use_mask
+        self.name = self.__class__.__name__
+        self.use_mask = use_mask
         self.use_rough = use_rough
 
         if not self.use_mask:
-            self.name += '_no_mask'
+            self.name += "_no_mask"
         if not self.use_rough:
-            self.name += '_no_rough'
+            self.name += "_no_rough"
 
         # initialize from existing models or create new models
-        self.warping_net = copy.deepcopy(warping_net.module) if warping_net is not None else WarpingNet()
-        self.shading_net = copy.deepcopy(shading_net.module) if shading_net is not None else ShadingNetSPAA()
+        self.warping_net = (
+            copy.deepcopy(warping_net.module)
+            if warping_net is not None
+            else WarpingNet()
+        )
+        self.shading_net = (
+            copy.deepcopy(shading_net.module)
+            if shading_net is not None
+            else ShadingNetSPAA()
+        )
 
         if self.use_mask:
-            self.register_buffer('mask', mask.clone())
+            self.register_buffer("mask", mask.clone())
 
         # fix procam net
         for param in self.shading_net.parameters():

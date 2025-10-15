@@ -212,7 +212,6 @@ def to_attacker_cfg_str(attacker_name):
         model_cfg_str    = None
     return attacker_cfg_str, model_cfg_str
 
-
 def spaa(pcnet, classifier, imagenet_labels, target_idx, targeted, cam_scene, d_thr, stealth_loss, device, setup_info):
     """
     Stealthy Projector-based Adversarial Attack (SPAA)
@@ -615,4 +614,3 @@ def summarize_all_attackers(attacker_names, data_root, setup_list, recreate_stat
     pivot_table.to_excel(join(data_root, 'setups/pivot_table_all.xlsx'), float_format='%.4f', index=True)
 
     return table, pivot_table
-
