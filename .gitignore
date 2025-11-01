@@ -7,3 +7,7 @@ pcnet/log/
 
 openvla/
 LIBERO/
+
+attack_run/
+wandb/
+

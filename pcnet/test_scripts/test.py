@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 from PIL import Image
 import os
@@ -7,9 +8,11 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # use torch to generate a 224 by 224 randomly colored image
-def generate_random_image(size=(224, 224)):
+def generate_random_image(
+    original_image_path, adversarial_image_path, output_image_path, size=(224, 224)
+):
 
-    img = Image.open("overlayed_og.png").convert("RGB")
+    img = Image.open(original_image_path).convert("RGB")
     img = img.crop((0, 0, size[0], size[1]))
     rgb = (
         torch.from_numpy(
@@ -32,7 +35,7 @@ def generate_random_image(size=(224, 224)):
     #     (adv_img.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
     # )
     # img.save("adv_image.png")
-    adv_img = Image.open("prj_adv.png").convert("RGB")
+    adv_img = Image.open(adversarial_image_path).convert("RGB")
     adv_img = adv_img.crop((0, 0, size[0], size[1]))
     adv_img = (
         torch.from_numpy(
@@ -53,9 +56,36 @@ def generate_random_image(size=(224, 224)):
     img = Image.fromarray(
         (overlayed.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
     )
-    img.save("overlayed_adv.png")
-    print(f"Random image saved to overlayed_adv.png")
+    img.save(output_image_path)
+    print(f"Random image saved to {output_image_path}")
+
+
+# function that parse args
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Applying adversarial overlay for Demo"
+    )
+    parser.add_argument(
+        "--original",
+        "-o",
+        type=str,
+        default="libero_spatial.png",
+    )
+    parser.add_argument(
+        "--adversarial",
+        "-adv",
+        type=str,
+        default="spatial_inner1000_outer50.png",
+    )
+    parser.add_argument(
+        "--output",
+        "-out",
+        type=str,
+        default="overlayed_adv.png",
+    )
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    generate_random_image()
+    args = parse_args()
+    generate_random_image(args.original, args.adversarial, args.output)
