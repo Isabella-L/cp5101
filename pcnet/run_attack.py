@@ -22,7 +22,6 @@ from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.vla.action_tokenizer import ActionTokenizer
 from openvla_dataloader import get_dataloader
 import datetime
-from torch.utils.tensorboard import SummaryWriter
 
 # spaa import
 from img_proc import expand_4d, center_crop as cc
@@ -32,9 +31,11 @@ from perc_al.differential_color_functions import rgb2lab_diff, ciede2000_diff
 
 
 def myAttack(
+    dataset,
     pcnet,
     vla,
     train_dataloader,
+    val_dataloader,
     device,
     name,
     root,
@@ -43,14 +44,15 @@ def myAttack(
     targeted=False,
     p_thr=0.25,
     d_thr=11.0,
+    eval_freq=500,
 ):
 
     # learning rates
-    adv_lr = 1e-3
-    col_lr = 1
+    adv_lr = 1e-3  # 5e-4
+    col_lr = 1e-4  # stealth usually benefit from gentle steps
 
     adv_w = 1  # weight for adversarial loss
-    stealth_loss = ["caml2"]  # using both caml2 and camdE, prjl2 ignored
+    stealth_loss = ["prjl2", "caml2"]  # using both caml2 and camdE, prjl2 ignored
     prjl2_w = (
         0.1 if "prjl2" in stealth_loss else 0
     )  # weight for pixel difference between prj_adv and im_gray
@@ -61,25 +63,24 @@ def myAttack(
         1 if "camdE" in stealth_loss else 0
     )  # weight for color fidelity(visual realism) between cam_infer and cam_scene
 
-    # p_thr = 0.25  # adv threshold
-    # d_thr = 11  # stealth threshold
-    # # d_thres = [5, 7, 9, 11]
-
     iters = outer_loop
     inner_loop = inner_loop
-    log_freq = 10
     B = 1
+    eval_batch_size = 10
+    maskidx = [0, 1, 2, 3, 4, 5]  # attack all dof except gripper
+    # maskidx = [0, 6]  # attack only base rotation and gripper open/close
 
     # => creates a residual image of learnable perturbatiosn on the input images
     prj_brightness = 0.2
     prj_im_sz = (224, 224)
     im_gray, prj_adv = create_prj_adv(B, prj_brightness, prj_im_sz, device)
-    adv_optimizer = transformers.AdamW([prj_adv], lr=adv_lr)
-    col_optimizer = transformers.AdamW([prj_adv], lr=col_lr)
+    adv_optimizer = transformers.AdamW(
+        [prj_adv], lr=adv_lr, weight_decay=0.0
+    )  # disable weight_decay
+    col_optimizer = transformers.AdamW([prj_adv], lr=col_lr, weight_decay=0.0)
     print("prj_adv initialised:", prj_adv.shape)
     save_image(prj_adv, f"{root}/initial.png")
 
-    maskidx = "0"
     # scheduler = transformers.get_cosine_schedule_with_warmup(
     #     optimizer=optimizer,
     #     num_warmup_steps=warmup,
@@ -91,13 +92,18 @@ def myAttack(
     val_CE_loss = []
     val_MSE_Distance = []
     val_UAD = []
+    val_col_loss = []
     train_CE_loss = []
     train_MSE_distance_loss = []
     train_UAD = []
 
     prj_adv_best = prj_adv.clone()
+    stealth_adv_best = prj_adv.clone()
+    best_adv = prj_adv.clone()
     col_loss_best = float("inf")
-    best_info = None  # (outer_iter, inner_iter, UAD, MSE_distance, col_loss)
+    # best_info = None  # (outer_iter, inner_iter, UAD, MSE_distance, col_loss)
+    MSE_Distance_best = 10000
+    stealth_loss_best = 10000
 
     mean = [
         torch.tensor([0.484375, 0.455078125, 0.40625]),  # imageNet normalization mean
@@ -108,21 +114,25 @@ def myAttack(
         torch.tensor([0.5, 0.5, 0.5]),
     ]
     wandb.init(
-        project="AttackOpenVLA",
-        sync_tensorboard=True,
+        project="SAA_Stealthy_Adversarial_Attack_standardized",
         name=name,
+        dir=root,
         tags=["uada", "perturbation"],
     )
     wandb.config.update(
         {
-            "iteration": inner_loop * iters,
-            "learning_rate": adv_lr,
+            "adv_lr": adv_lr,
+            "stealth_lr": col_lr,
             "attack_target": maskidx,
-            "accumulate_steps": 1,
+            "p_thr": p_thr,
+            "d_thr": d_thr,
+            "inner_loop": inner_loop,
+            "outer_loop": outer_loop,
+            "libero_model": dataset,
+            "eval_freq": eval_freq,
+            "eval_batch_size": eval_batch_size,
         }
     )
-    writer = SummaryWriter(root)
-    writer.add_text("config", str(wandb.config), 0)
 
     for i in tqdm(range(0, iters)):
         train_relative_distance = {f"{idx}": [] for idx in maskidx}
@@ -131,8 +141,10 @@ def myAttack(
         attention_mask = data["attention_mask"].to(device)
         input_ids = data["input_ids"].to(device)
         cam_scene = data["pixel_values"]
-
+        labels = mask_labels(action_tokenizer, labels, maskidx)
+        success_count = 0
         for j in range(inner_loop):
+            iteration = inner_loop * i + j
             # cam_infer = apply_projection(pcnet, prj_adv, cam_scene, mean, std)
             cam_scene_t, cam_infer_t, vla_scene = apply_perturbation(
                 prj_adv, cam_scene, mean, std, root
@@ -144,152 +156,279 @@ def myAttack(
                 attention_mask=attention_mask,
                 pixel_values=vla_scene.to(torch.bfloat16).to(device),
                 labels=labels,
+                use_cache=False,
             )
 
             # --------------compute loss & back propagation-----------------
             # adv loss
             celoss = output.loss
+            # MSE_distance  = distance between output and max discrepency
+            # UAD = average deviation from ground truth
             MSE_Distance, UAD = weighted_loss(output.logits, labels, maskidx)
-            # printing to check for threshold
-            # TODO: plot UAD and MSE distance over iterations
-            MSE_Distance = MSE_Distance + 1 / celoss
-
-            # MSE_Distance.backward()
-
-            # train_CE_loss.append(celoss.item())
-            # train_MSE_distance_loss.append(MSE_Distance.item())
-            # train_UAD.append(UAD.item())
-            # log_patch_grad = prj_adv.grad.detach().mean().item()
+            # MSE_Distance = MSE_Distance + 1 / celoss
+            # 1/celoss might cause explosion when celoss is 0
+            eps = 1e-6
+            alpha = 1.0  # tune
+            MSE_Distance = MSE_Distance + alpha / (celoss.detach() + eps)
 
             # stealth loss
             prjl2 = torch.norm(im_gray - prj_adv, dim=1).mean(1).mean(1)
             col_loss = prjl2_w * prjl2
-            # stealthiness loss: cam-captured image should look like cam_scene (L2 loss)
-            caml2 = (
-                torch.norm(cam_scene_t - cam_infer_t, dim=1).mean(1).mean(1)
-            )  # mean L2 norm, consistent with Zhao_CVPR_20
+            caml2 = torch.norm(cam_scene_t - cam_infer_t, dim=1).mean(1).mean(1)
             col_loss += caml2_w * caml2
             # color fidelity to human eye (CIE deltaE 2000 loss)
-            camdE = (
-                ciede2000_diff(
-                    rgb2lab_diff(cam_infer_t, device),
-                    rgb2lab_diff(cam_scene_t, device),
-                    device,
-                )
-                .mean(1)
-                .mean(1)
-            )
-            col_loss += camdE_w * camdE
+            # camdE = (
+            #     ciede2000_diff(
+            #         rgb2lab_diff(cam_infer_t, device),
+            #         rgb2lab_diff(cam_scene_t, device),
+            #         device,
+            #     )
+            #     .mean(1)
+            #     .mean(1)
+            # )
+            # col_loss += camdE_w * camdE
             col_loss = col_loss.mean()
 
-            # TODO: use col_loss instead of caml2 for thresholding
-            mask_high_pert = (col_loss * 255 > d_thr).bool()  # not enough stealth
-            mask_uad_ok = (UAD > p_thr).bool()  # success attack
-            mask_better_loss = mask_uad_ok & (col_loss.item() < col_loss_best)
+            stealth_loss_ok = (col_loss * 255 < d_thr).bool()
+            adv_loss_ok = (UAD > p_thr).bool()
+            is_better_loss = adv_loss_ok & (col_loss.item() < col_loss_best)
 
-            success_count = 0
             # ---------------update------------------
-            if j % log_freq == 0:
-                print("mse_distance:", MSE_Distance.item(), "uad:", UAD.item())
-                print("color loss and caml2:", col_loss.item(), caml2.item())
-                iteration = inner_loop * i + j
-                writer.add_scalar("adv_loss/UAD", UAD.item(), iteration)
-                writer.add_scalar("stealth_loss/caml2", caml2.item(), iteration)
-                writer.add_scalar(
-                    "adv_loss/MSE_Distance", MSE_Distance.item(), iteration
-                )
-                writer.add_scalar("stealth_loss/col_loss", col_loss.item(), iteration)
-                writer.flush()
-                if mask_better_loss:
-                    col_loss_best = col_loss.item()
-                    prj_adv_best = prj_adv.clone().detach()
-                    best_info = (
-                        i,
-                        j,
-                        UAD.item(),
-                        # MSE_Distance.item(),
-                        col_loss.item(),
-                    )
-                    # print(f"current best info: {best_info}")
-                if not mask_uad_ok:  # ensure attack successful
-                    MSE_Distance.backward()
-                    adv_optimizer.step()
-                    adv_optimizer.zero_grad()
-                elif (
-                    mask_uad_ok and mask_high_pert
-                ):  # then decrease perturbation visibility
-                    col_loss.backward()
-                    col_optimizer.step()
-                    col_optimizer.zero_grad()
-                else:
-                    success_count += 1
-                    col_loss.backward()
-                    col_optimizer.step()
-                    col_optimizer.zero_grad()
-                    if success_count >= 2:
-                        print("color loss and caml2:", col_loss.item(), caml2.item())
-                        print("Both attack and stealth achieved! Iteration taken:", j)
-                        success_count = 0
-                        tmp = prj_adv.clone()
-                        save_tensor_as_image(
-                            tmp, f"{root}/prj_adv_iter_{i}_inner_{j}_success.png"
-                        )
-                        break
-            prj_adv.grad = None
-            prj_adv.data = prj_adv.data.clamp(0, 1)
-            vla.zero_grad()
-        action_logits = output.logits[
-            :, vla.vision_backbone.featurizer.patch_embed.num_patches : -1
-        ]
-        action_preds = action_logits.argmax(dim=2)
-        action_gt = labels[:, 1:].to(action_preds.device)
-        mask = action_gt > action_tokenizer.action_token_begin_idx
-        continuous_actions_pred = torch.tensor(
-            action_tokenizer.decode_token_ids_to_actions(
-                action_preds[mask].cpu().numpy()
-            )
-        )
-        continuous_actions_gt = torch.tensor(
-            action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy())
-        )
-        train_relative_distance = calculate_relative_distance(
-            continuous_actions_pred,
-            continuous_actions_gt,
-            maskidx,
-            train_relative_distance,
-        )
-        train_logdata = {
-            "TRAIN_ADV_LR": adv_optimizer.param_groups[0]["lr"],
-            "TRAIN_COL_LR": col_optimizer.param_groups[0]["lr"],
-            "TRAIN_attack_loss (MSE_Distance)": MSE_Distance.item(),
-            "TRAIN_UAD": UAD,
-        }
-        for key, value in train_relative_distance.items():
-            property_name = f"train_rd_{key}"
-            train_logdata[property_name] = sum(value) / len(value)
-        wandb.log(train_logdata)
+            # if j % log_freq == 0:
+            # print("mse_distance:", MSE_Distance.item(), "uad:", UAD.item())
+            # print("color loss and caml2:", col_loss.item(), caml2.item())
 
-        print("NAD", train_relative_distance)
-        torch.cuda.empty_cache()
+            if stealth_loss_ok or not adv_loss_ok:  # focus on attack
+                if adv_loss_ok:
+                    success_count += 1
+                    print("Success achieved at iteration:", iteration)
+                loss = MSE_Distance
+                # train_CE_loss.append(celoss.item())
+                # train_MSE_distance_loss.append(MSE_Distance.item())
+                # train_UAD.append(UAD.item())
+                optimizer = adv_optimizer
+            else:
+                loss = col_loss
+                optimizer = col_optimizer
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            log_patch_grad = prj_adv.grad.detach().mean().item()
+            optimizer.step()
+            with torch.no_grad():
+                prj_adv.clamp_(0.0, 1.0)  # maintain prj_adv as leaf
+
+            # vla.zero_grad()
+            # torch.cuda.empty_cache()
+
+            action_logits = output.logits[
+                :, vla.vision_backbone.featurizer.patch_embed.num_patches : -1
+            ]
+            action_preds = action_logits.argmax(dim=2)
+            action_gt = labels[:, 1:].to(action_preds.device)
+            mask = action_gt > action_tokenizer.action_token_begin_idx
+            continuous_actions_pred = torch.tensor(
+                action_tokenizer.decode_token_ids_to_actions(
+                    action_preds[mask].cpu().numpy()
+                )
+            )
+            continuous_actions_gt = torch.tensor(
+                action_tokenizer.decode_token_ids_to_actions(
+                    action_gt[mask].cpu().numpy()
+                )
+            )
+            # NAD logs the dimension under attack(Specified by maskidx)
+            train_relative_distance = calculate_relative_distance(
+                continuous_actions_pred,
+                continuous_actions_gt,
+                maskidx,
+                train_relative_distance,
+            )
+            train_logdata = {
+                # "train/lr/adv": adv_optimizer.param_groups[0]["lr"],
+                # "train/lr/col": col_optimizer.param_groups[0]["lr"],
+                "train/adv_loss/UAD": UAD.item(),
+                "train/adv_loss/MSE_Distance": MSE_Distance.item(),
+                # "train/stealth_loss/caml2": caml2.item(),
+                "train/stealth_loss/col_loss": col_loss.item(),
+                "train/patch_grad": log_patch_grad,
+                "train/step": iteration,
+            }
+            for key, value in train_relative_distance.items():
+                property_name = f"train/NAD_{key}"
+                train_logdata[property_name] = sum(value) / len(value)
+            wandb.log(train_logdata)
+
+            if (iteration + 1) % eval_freq == 0:
+                # val_num_sample = 0
+                avg_MSE_Distance = 0
+                avg_UAD = 0
+                avg_CE_loss = 0
+                avg_col_loss = 0
+                relative_distance = {f"{idx}": [] for idx in maskidx}  # NAD
+                print("evaluating...")
+                # torch.cuda.empty_cache()
+                val_iterator = iter(val_dataloader)
+                with torch.inference_mode():
+                    for k in tqdm(range(eval_batch_size)):
+                        try:
+                            val_data = next(val_iterator)
+                        except StopIteration:
+                            val_iterator = iter(val_dataloader)
+                            val_data = next(val_iterator)
+                        val_labels = val_data["labels"].to(device)
+                        val_attention_mask = val_data["attention_mask"].to(device)
+                        val_input_ids = val_data["input_ids"].to(device)
+                        val_cam_scene = val_data["pixel_values"]
+                        # val_num_sample += val_labels.shape[0]
+                        val_labels = mask_labels(action_tokenizer, val_labels, maskidx)
+                        val_cam_scene_t, val_cam_infer_t, val_vla_scene = (
+                            apply_perturbation(prj_adv, val_cam_scene, mean, std, root)
+                        )
+                        val_output: CausalLMOutputWithPast = vla(
+                            input_ids=val_input_ids,
+                            attention_mask=val_attention_mask,
+                            pixel_values=val_vla_scene.to(torch.bfloat16).to(device),
+                            labels=val_labels,
+                            use_cache=False,  # save gpu mem
+                        )
+                        val_MSE_Distance, val_UAD = weighted_loss(
+                            val_output.logits, val_labels, maskidx
+                        )
+                        val_caml2 = (
+                            torch.norm(val_cam_scene_t - val_cam_infer_t, dim=1)
+                            .mean(1)
+                            .mean(1)
+                        )
+                        val_caml2 = val_caml2.mean()
+
+                        # TODO: add color fidelity validation
+
+                        val_action_logits = val_output.logits[
+                            :,
+                            vla.vision_backbone.featurizer.patch_embed.num_patches : -1,
+                        ]
+                        val_action_preds = val_action_logits.argmax(dim=2)
+                        val_action_gt = val_labels[:, 1:].to(val_action_preds.device)
+                        val_mask = (
+                            val_action_gt > action_tokenizer.action_token_begin_idx
+                        )
+                        continuous_actions_pred = torch.tensor(
+                            action_tokenizer.decode_token_ids_to_actions(
+                                val_action_preds[val_mask].cpu().numpy()
+                            )
+                        )
+                        continuous_actions_gt = torch.tensor(
+                            action_tokenizer.decode_token_ids_to_actions(
+                                val_action_gt[val_mask].cpu().numpy()
+                            )
+                        )
+                        relative_distance = calculate_relative_distance(
+                            continuous_actions_pred,
+                            continuous_actions_gt,
+                            maskidx,
+                            relative_distance,
+                        )
+                        avg_MSE_Distance += val_MSE_Distance.item()
+                        avg_UAD += val_UAD.item()
+                        avg_CE_loss += val_output.loss.item()
+                        avg_col_loss += val_caml2.item()
+                    torch.cuda.empty_cache()
+                    avg_MSE_Distance /= eval_batch_size
+                    avg_UAD /= eval_batch_size
+                    avg_CE_loss /= eval_batch_size
+                    avg_col_loss /= eval_batch_size
+                    log_data = {
+                        "val/MSE_distance": avg_MSE_Distance,
+                        "val/UAD": avg_UAD,
+                        "val/CE_loss": avg_CE_loss,
+                        "val/col_loss": avg_col_loss,
+                        "val/step": k,
+                    }
+                    for key, value in relative_distance.items():
+                        property_name = f"val/NAD_{key}"
+                        log_data[property_name] = sum(value) / len(value)
+                    wandb.log(log_data)
+                    stealthy = avg_col_loss * 255 < d_thr
+                    successful = avg_UAD > 0.1
+                    if stealthy and successful:
+                        print(
+                            f"Successful and stealthy attack at outer iter {i} inner iter {j} with UAD {avg_UAD}, col loss {avg_col_loss}"
+                        )
+                        if (
+                            avg_MSE_Distance < MSE_Distance_best
+                            and avg_col_loss < stealth_loss_best
+                        ):
+                            print(
+                                f"New best [attack+stealthy] patch found at outer iter {i} inner iter {j} with UAD {avg_UAD}, col loss {avg_col_loss}"
+                            )
+                            MSE_Distance_best = avg_MSE_Distance
+                            stealth_loss_best = avg_col_loss
+                            best_adv = prj_adv.clone()
+                        if avg_MSE_Distance < MSE_Distance_best:
+                            MSE_Distance_best = avg_MSE_Distance
+                            print(
+                                f"Also a new best [attack] patch found at outer iter {i} inner iter {j} with UAD {avg_UAD}, col loss {col_loss}"
+                            )
+                            prj_adv_best = prj_adv.clone()
+                        if avg_col_loss < stealth_loss_best:
+                            stealth_loss_best = avg_col_loss
+                            print(
+                                f"Also a new best [stealthy] patch found at outer iter {i} inner iter {j} with UAD {avg_UAD}, col loss {avg_col_loss}"
+                            )
+                            stealth_adv_best = prj_adv.clone()
+                        # val_CE_loss.append(float(avg_CE_loss))
+                        # val_MSE_Distance.append(float(avg_MSE_Distance))
+                        # val_UAD.append(float(avg_UAD))
+                        # val_col_loss.append(float(avg_col_loss))
+                        # TODO: log info
+                        del (
+                            val_labels,
+                            val_attention_mask,
+                            val_input_ids,
+                            val_cam_scene,
+                            val_cam_scene_t,
+                            val_cam_infer_t,
+                            val_vla_scene,
+                            val_output,
+                            val_action_logits,
+                            val_action_preds,
+                            val_action_gt,
+                            val_mask,
+                        )
+                torch.cuda.empty_cache()
+
+        # ------------ Outer Loop -------------------
         # save this iteration's prj_adv
-        tmp = prj_adv.clone()
-        save_tensor_as_image(tmp, f"{root}/prj_adv_iter_{i}.png")
-        save_tensor_as_image(
-            prj_adv_best,
-            f"{root}/best_adv.png",
-        )
-        print("Best info so far:", best_info)
-    save_tensor_as_image(
-        prj_adv_best,
-        f"{root}/final_prj_adv_{best_info}.png",
-    )
+        save_tensor_as_image(best_adv, f"{root}/best.png")
+        save_tensor_as_image(prj_adv_best, f"{root}/adv_best.png")
+        save_tensor_as_image(stealth_adv_best, f"{root}/stealth_best.png")
+
+        if i % 100 == 0:
+            tmp = prj_adv.clone()
+            save_tensor_as_image(
+                tmp, f"{root}/prj_adv_iter_{i}_success_{success_count}.png"
+            )
+        print("Success count in this outer loop:", success_count)
+        torch.cuda.empty_cache()
     wandb.finish()
-    writer.close()
-    return prj_adv_best.detach().cpu(), best_info
+
+
+def mask_labels(action_tokenizer, labels, maskidx, dof=7):
+    mask = labels > action_tokenizer.action_token_begin_idx
+    masked_labels = labels[mask]
+    masked_labels = masked_labels.view(masked_labels.shape[0] // dof, dof)
+    template_labels = torch.ones_like(masked_labels, device=masked_labels.device) * -100
+    for idx in maskidx:
+        template_labels[:, idx] = masked_labels[:, idx]
+    labels[labels > 2] = template_labels.view(-1)
+    return labels
 
 
 def save_tensor_as_image(tensor, path):
-    T.ToPILImage()(tensor.squeeze(0)).save(os.path.join(run_root, path))
+    Image = T.ToPILImage()(tensor.squeeze(0))
+    Image.save(os.path.join(run_root, path))
+    return Image
 
 
 def calculate_relative_distance(pred, gt, maskidx, relative_distance):
@@ -573,6 +712,8 @@ if __name__ == "__main__":
     ).to(device)
     for param in vla.parameters():
         param.requires_grad = False
+    if hasattr(vla.config, "use_cache"):
+        vla.config.use_cache = False
     print(
         f"{vla_path} model created and loaded............................................."
     )
@@ -613,7 +754,7 @@ if __name__ == "__main__":
     results_root = abspath(
         join(
             root,
-            "attack_run",
+            "attack_run_standardized",
             f"attack_{dataset}_inner{inner_loop}_outer{outer_loop}_p{p_thr}_d{d_thr}",
         )
     )
@@ -621,10 +762,12 @@ if __name__ == "__main__":
     run_name = "attack_" + now
     run_root = abspath(join(results_root, run_name))
     os.makedirs(run_root, exist_ok=True)
-    prj_adv, best_info = myAttack(
+    myAttack(
+        dataset,
         None,
         vla,
         train_dataloader,
+        val_dataloader,
         device,
         run_name,
         run_root,
@@ -634,8 +777,6 @@ if __name__ == "__main__":
         p_thr=p_thr,
         d_thr=d_thr,
     )
-    print("prj_adv size:", prj_adv.shape)
-    print("best_info:", best_info)
     print(
         f"Attack finished and log result saved at {run_root}........................."
     )

@@ -4,6 +4,9 @@ build/
 pcnet/data/prj_share/
 pcnet/data/setups/coffee_mug/
 pcnet/log/
+pcnet/attack_run/
+pcnet/attack_run_new/
+pcnet/attack_run_standardized/
 
 openvla/
 LIBERO/
